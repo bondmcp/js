@@ -1,0 +1,152 @@
+name: Auto-Update JavaScript SDK
+
+on:
+  repository_dispatch:
+    types: [api-updated]
+  schedule:
+    # Run daily at 2 AM UTC to check for API changes
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_update:
+        description: 'Force update even if no changes detected'
+        required: false
+        default: 'false'
+
+jobs:
+  check-api-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      api_changed: ${{ steps.check.outputs.api_changed }}
+      new_version: ${{ steps.check.outputs.new_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm install axios
+
+      - name: Check API changes
+        id: check
+        run: |
+          node scripts/check_api_changes.js
+        env:
+          API_BASE_URL: https://api.bondmcp.com
+
+  update-sdk:
+    needs: check-api-changes
+    if: needs.check-api-changes.outputs.api_changed == 'true' || github.event.inputs.force_update == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Generate SDK from OpenAPI
+        run: |
+          node scripts/generate_sdk.js
+        env:
+          API_BASE_URL: https://api.bondmcp.com
+
+      - name: Update version
+        run: |
+          node scripts/update_version.js ${{ needs.check-api-changes.outputs.new_version }}
+
+      - name: Build SDK
+        run: |
+          npm run build
+
+      - name: Run tests
+        run: |
+          npm test
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "info@auroracapital.nl"
+          git config --local user.name "BondMCP Auto-Update"
+          git add .
+          git commit -m "Auto-update SDK to version ${{ needs.check-api-changes.outputs.new_version }}" || exit 0
+          git push
+
+      - name: Create Pull Request
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Auto-update SDK to version ${{ needs.check-api-changes.outputs.new_version }}"
+          title: "Auto-update SDK to version ${{ needs.check-api-changes.outputs.new_version }}"
+          body: |
+            This PR was automatically generated to update the SDK with the latest API changes.
+            
+            **Changes:**
+            - Updated SDK to match API version ${{ needs.check-api-changes.outputs.new_version }}
+            - Regenerated client code from OpenAPI specification
+            - Updated TypeScript types and interfaces
+            - Updated documentation and examples
+            
+            **Testing:**
+            - All existing tests pass
+            - New endpoints have been tested
+            - TypeScript compilation successful
+            
+            Please review and merge if everything looks correct.
+          branch: auto-update-${{ needs.check-api-changes.outputs.new_version }}
+          delete-branch: true
+
+  publish:
+    needs: [check-api-changes, update-sdk]
+    if: success() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: |
+          npm install
+
+      - name: Build package
+        run: |
+          npm run build
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.check-api-changes.outputs.new_version }}
+          release_name: Release v${{ needs.check-api-changes.outputs.new_version }}
+          body: |
+            Auto-generated release for SDK version ${{ needs.check-api-changes.outputs.new_version }}
+            
+            This release includes the latest API changes and improvements.
+          draft: false
+          prerelease: false
+
